@@ -1,21 +1,28 @@
 const ytdl = require("@distube/ytdl-core");
-const fs = require("fs").promises;
+const fs = require("fs");
+const fsPromises = require("fs").promises;
 const path = require("path");
 const sanitize = require("sanitize-filename");
-const pLimit = require("p-limit");
 const lockfile = require("proper-lockfile");
+
+// Dynamic import for p-limit (ESM module)
+let pLimit;
+(async () => {
+  const module = await import("p-limit");
+  pLimit = module.default;
+})();
 
 // Configuration
 const URLS_FILE = path.join(__dirname, "urls.txt");
 const OUTPUT_DIR = path.join(__dirname, "videos");
-const CONCURRENCY_LIMIT = 4; // Max concurrent downloads
-const MAX_RETRIES = 3; // Retry attempts for failed downloads
-const RETRY_DELAY_BASE = 2000; // Base delay for retries (ms)
+const CONCURRENCY_LIMIT = 2;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_BASE = 2000;
 
 // Create output directory
 async function ensureOutputDir() {
   try {
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
+    await fsPromises.mkdir(OUTPUT_DIR, { recursive: true });
   } catch (err) {
     console.error("Error creating output directory:", err.message);
     process.exit(1);
@@ -25,15 +32,15 @@ async function ensureOutputDir() {
 // Read URLs from file
 async function readUrls() {
   try {
-    const data = await fs.readFile(URLS_FILE, "utf8");
+    const data = await fsPromises.readFile(URLS_FILE, "utf8");
     return data
       .split("\n")
       .map((url) => url.trim())
-      .filter((url) => url && ytdl.validateURL(url)); // Keep valid YouTube URLs
+      .filter((url) => url && ytdl.validateURL(url));
   } catch (err) {
     if (err.code === "ENOENT") {
       console.log("urls.txt not found, creating empty file.");
-      await fs.writeFile(URLS_FILE, "");
+      await fsPromises.writeFile(URLS_FILE, "");
       return [];
     }
     console.error("Error reading urls.txt:", err.message);
@@ -47,7 +54,7 @@ async function removeUrlFromFile(urlToRemove) {
   try {
     const urls = await readUrls();
     const updatedUrls = urls.filter((url) => url !== urlToRemove);
-    await fs.writeFile(
+    await fsPromises.writeFile(
       URLS_FILE,
       updatedUrls.join("\n") + (updatedUrls.length ? "\n" : "")
     );
@@ -70,7 +77,7 @@ async function downloadVideo(url, attempt = 1) {
 
     // Skip if file exists
     try {
-      await fs.access(outputPath);
+      await fsPromises.access(outputPath);
       console.log(`Video "${videoTitle}" already downloaded, skipping.`);
       await removeUrlFromFile(url);
       return true;
@@ -78,14 +85,41 @@ async function downloadVideo(url, attempt = 1) {
       // File doesn't exist, proceed
     }
 
-    // Download 360p (itag 18 or fallback to 360p MP4)
-    const video = ytdl(url, {
-      filter: (format) =>
+    // Find 360p MP4 format
+    const format = info.formats.find(
+      (format) =>
         format.itag === 18 ||
         (format.container === "mp4" &&
           format.height === 360 &&
           format.hasVideo &&
-          format.hasAudio),
+          format.hasAudio &&
+          format.codecs.includes("avc1") && // H.264
+          format.audioCodec?.includes("mp4a")) // AAC
+    );
+
+    if (!format) {
+      console.error(
+        `No suitable 360p MP4 format found for ${url}. Available formats:`
+      );
+      console.error(
+        JSON.stringify(
+          info.formats.map((f) => ({
+            itag: f.itag,
+            container: f.container,
+            height: f.height,
+            codecs: f.codecs,
+            audioCodec: f.audioCodec,
+          })),
+          null,
+          2
+        )
+      );
+      throw new Error("No suitable 360p MP4 format found");
+    }
+
+    // Download using explicit format
+    const video = ytdl(url, {
+      filter: (format) => format.itag === format.itag, // Use exact format
     });
 
     // Create write stream
@@ -142,6 +176,11 @@ async function downloadAllVideos() {
 
   console.log(`Starting download of ${urls.length} videos...`);
 
+  // Wait for pLimit to be available
+  while (!pLimit) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
   // Limit concurrency
   const limit = pLimit(CONCURRENCY_LIMIT);
   const tasks = urls.map((url) =>
@@ -151,6 +190,7 @@ async function downloadAllVideos() {
       if (!success) {
         console.log(`Failed to download ${url}, keeping in urls.txt`);
       }
+      return success;
     })
   );
 
@@ -158,8 +198,7 @@ async function downloadAllVideos() {
   console.log("All downloads complete!");
 }
 
-// Run the process
+// Run the process with non-fatal error handling
 downloadAllVideos().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
+  console.error("Error in download process:", err.message);
 });
