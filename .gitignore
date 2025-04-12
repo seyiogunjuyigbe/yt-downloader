@@ -1,0 +1,11 @@
+# Ignore node_modules
+node_modules/
+
+# Ignore all files in videos folder
+videos/*
+
+# Track urls.txt file structure but not its contents (handled via git update-index)
+# urls.txt is listed here as a placeholder; its contents are managed separately
+urls.txt
+
+package-lock.json
